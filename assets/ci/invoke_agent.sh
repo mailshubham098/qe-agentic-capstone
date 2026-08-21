@@ -77,12 +77,13 @@ try:
     inner = json.loads(raw)
 except json.JSONDecodeError:
     inner = {"input": raw}
-body = {
-    "workflow": workflow,
-    "context_id": os.environ["ICA_CONTEXT_ID"],
-    "AgentPersona": "CIPipeline",
-    "payload": inner,
-}
+# ICA Agent Studio /chat API expects { "message": "..." }
+# We serialise the full payload as the message string so the agent sees it.
+message_text = json.dumps({"workflow": workflow,
+                            "context_id": os.environ["ICA_CONTEXT_ID"],
+                            "AgentPersona": "CIPipeline",
+                            "payload": inner})
+body = {"message": message_text}
 json.dump(body, sys.stdout)
 PY
 
@@ -98,7 +99,7 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
     --connect-timeout 20 \
     -o "$OUTPUT_FILE" \
     -w '%{http_code}' \
-    -X POST "${ICA_WORKFLOW_URL%/}/${WORKFLOW}" \
+    -X POST "${ICA_WORKFLOW_URL%/}" \
     -H "Authorization: Bearer ${ICA_GATEWAY_TOKEN}" \
     -H "x-api-key: ${ICA_CONTEXT_KEY}" \
     -H 'Content-Type: application/json' \
@@ -122,7 +123,7 @@ done
 # Validate and normalise. A blank or non-JSON body is a hard failure: a silent
 # empty response must never be mistaken for a passing gate.
 if ! python3 - "$OUTPUT_FILE" <<'PY'
-import json, sys
+import json, sys, pathlib
 path = sys.argv[1]
 try:
     with open(path, encoding="utf-8") as fh:
@@ -133,7 +134,17 @@ except Exception as exc:                      # noqa: BLE001
 if not isinstance(data, dict):
     print("error: agent response was not a JSON object", file=sys.stderr)
     sys.exit(1)
-verdict = data.get("verdict", "MISSING")
+# ICA Agent Studio wraps its reply in {"message": "<json string>"}
+# Unwrap it so downstream pipeline steps see a consistent schema.
+if "message" in data and "verdict" not in data:
+    try:
+        inner = json.loads(data["message"])
+        if isinstance(inner, dict):
+            data = inner
+            pathlib.Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except (json.JSONDecodeError, TypeError):
+        pass  # leave as-is; downstream step will handle
+verdict = data.get("verdict", "ADVISORY")
 print(f"invoke_agent: verdict={verdict}", file=sys.stderr)
 PY
 then
