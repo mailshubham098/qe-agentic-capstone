@@ -1,0 +1,443 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================================
+  Applied AI Specialist Capstone — Quality Engineering (QES) Track
+  Single Maven project for all 14 agentic QE workflows.
+
+  Java 21 (LTS) · JUnit 5 · Selenium · Playwright · REST Assured · Cucumber
+  Datafaker · AssertJ · JaCoCo · JMeter
+
+  Every dependency version below was resolved against Maven Central and is
+  pinned. Do not use version ranges and do not introduce SNAPSHOTs.
+  See assets/VERSION_MANIFEST.md before bumping anything.
+
+  Profiles
+    -Papi            REST Assured API suites only              (WF07)
+    -Pui             Selenium + Playwright UI suites only       (WF06)
+    -Pbdd            Cucumber BDD runner only                  (WF04)
+    -Pa11y           Accessibility suites only                 (WF14)
+    -Pperf           JMeter performance run                     (WF12)
+    -Pselected       Run only the agent-selected test subset    (WF03)
+
+  Usage
+    mvn -q clean verify                 full suite
+    mvn -q clean verify -Papi           API only
+    mvn -q verify -Pselected            optimised subset chosen by the agent
+  ============================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.ibm.qe</groupId>
+  <artifactId>qe-agentic-capstone</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <name>QE Agentic Capstone</name>
+  <description>
+    Agent-generated quality engineering assets for the Applied AI Specialist
+    capstone: API, UI, BDD, performance, resilience and accessibility suites.
+  </description>
+
+  <properties>
+    <!-- Build -->
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <!-- Test frameworks -->
+    <junit.jupiter.version>5.12.2</junit.jupiter.version>
+    <junit.platform.version>1.12.2</junit.platform.version>
+    <assertj.version>3.27.3</assertj.version>
+
+    <!-- UI automation -->
+    <selenium.version>4.33.0</selenium.version>
+    <playwright.version>1.52.0</playwright.version>
+
+    <!-- API automation -->
+    <restassured.version>5.5.2</restassured.version>
+
+    <!-- BDD -->
+    <cucumber.version>7.22.1</cucumber.version>
+
+    <!-- Accessibility -->
+    <axe.version>4.10.1</axe.version>
+
+    <!-- Test data -->
+    <datafaker.version>2.4.3</datafaker.version>
+    <postgresql.version>42.7.7</postgresql.version>
+    <testcontainers.version>1.21.3</testcontainers.version>
+
+    <!-- Support -->
+    <jackson.version>2.18.4</jackson.version>
+    <slf4j.version>2.0.17</slf4j.version>
+    <logback.version>1.5.18</logback.version>
+    <awaitility.version>4.3.0</awaitility.version>
+
+    <!-- Plugins -->
+    <surefire.version>3.5.6</surefire.version>
+    <failsafe.version>3.5.6</failsafe.version>
+    <compiler.plugin.version>3.14.1</compiler.plugin.version>
+    <jacoco.version>0.8.13</jacoco.version>
+    <jmeter.plugin.version>3.8.0</jmeter.plugin.version>
+
+    <!-- Applications under test — override with -D or environment -->
+    <aut.petclinic.ui.url>http://localhost:8080</aut.petclinic.ui.url>
+    <aut.petclinic.api.url>http://localhost:9966/petclinic/api</aut.petclinic.api.url>
+    <aut.saucedemo.url>https://www.saucedemo.com</aut.saucedemo.url>
+    <aut.parabank.url>https://parabank.parasoft.com/parabank</aut.parabank.url>
+
+    <!-- Execution control -->
+    <surefire.includes.default>**/*Test.java,**/*Tests.java</surefire.includes.default>
+    <selected.tests>**/*Test.java</selected.tests>
+    <skip.a11y>false</skip.a11y>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.junit</groupId>
+        <artifactId>junit-bom</artifactId>
+        <version>${junit.jupiter.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${testcontainers.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson</groupId>
+        <artifactId>jackson-bom</artifactId>
+        <version>${jackson.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+
+    <!-- ==================== JUnit 5 ==================== -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-params</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-suite</artifactId>
+      <version>${junit.platform.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ==================== Assertions ==================== -->
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <version>${assertj.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ==================== WF06 · Selenium ==================== -->
+    <dependency>
+      <groupId>org.seleniumhq.selenium</groupId>
+      <artifactId>selenium-java</artifactId>
+      <version>${selenium.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ==================== WF06 · Playwright ==================== -->
+    <dependency>
+      <groupId>com.microsoft.playwright</groupId>
+      <artifactId>playwright</artifactId>
+      <version>${playwright.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ==================== WF07 · REST Assured ==================== -->
+    <dependency>
+      <groupId>io.rest-assured</groupId>
+      <artifactId>rest-assured</artifactId>
+      <version>${restassured.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.rest-assured</groupId>
+      <artifactId>json-schema-validator</artifactId>
+      <version>${restassured.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.rest-assured</groupId>
+      <artifactId>json-path</artifactId>
+      <version>${restassured.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ==================== WF04 · Cucumber BDD ==================== -->
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-java</artifactId>
+      <version>${cucumber.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-junit-platform-engine</artifactId>
+      <version>${cucumber.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ==================== WF14 · Accessibility ==================== -->
+    <dependency>
+      <groupId>com.deque.html.axe-core</groupId>
+      <artifactId>selenium</artifactId>
+      <version>${axe.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.deque.html.axe-core</groupId>
+      <artifactId>playwright</artifactId>
+      <version>${axe.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ==================== WF05 · Test data ==================== -->
+    <dependency>
+      <groupId>net.datafaker</groupId>
+      <artifactId>datafaker</artifactId>
+      <version>${datafaker.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>${postgresql.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ==================== Support ==================== -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>${slf4j.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <version>${logback.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.awaitility</groupId>
+      <artifactId>awaitility</artifactId>
+      <version>${awaitility.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+  </dependencies>
+
+  <build>
+    <plugins>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>${compiler.plugin.version}</version>
+        <configuration>
+          <release>${maven.compiler.release}</release>
+          <compilerArgs>
+            <arg>-parameters</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+
+      <!--
+        Surefire runs the JUnit 5 suites.
+        Parallel execution is enabled at class level; every generated test must
+        be independent (see qe_standards_and_dod.md §3).
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire.version}</version>
+        <configuration>
+          <includes>
+            <include>${surefire.includes.default}</include>
+          </includes>
+          <systemPropertyVariables>
+            <aut.petclinic.ui.url>${aut.petclinic.ui.url}</aut.petclinic.ui.url>
+            <aut.petclinic.api.url>${aut.petclinic.api.url}</aut.petclinic.api.url>
+            <aut.saucedemo.url>${aut.saucedemo.url}</aut.saucedemo.url>
+            <aut.parabank.url>${aut.parabank.url}</aut.parabank.url>
+            <junit.jupiter.execution.parallel.enabled>true</junit.jupiter.execution.parallel.enabled>
+            <junit.jupiter.execution.parallel.mode.default>same_thread</junit.jupiter.execution.parallel.mode.default>
+            <junit.jupiter.execution.parallel.mode.classes.default>concurrent</junit.jupiter.execution.parallel.mode.classes.default>
+            <junit.jupiter.execution.parallel.config.strategy>fixed</junit.jupiter.execution.parallel.config.strategy>
+            <junit.jupiter.execution.parallel.config.fixed.parallelism>3</junit.jupiter.execution.parallel.config.fixed.parallelism>
+            <cucumber.plugin>pretty,html:target/cucumber-report.html,json:target/cucumber.json,junit:target/cucumber-junit.xml</cucumber.plugin>
+            <cucumber.publish.quiet>true</cucumber.publish.quiet>
+          </systemPropertyVariables>
+          <!-- Fail the build on flaky reruns rather than hiding them -->
+          <rerunFailingTestsCount>0</rerunFailingTestsCount>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <version>${failsafe.version}</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Coverage — NFR-006 gates line coverage on changed classes at 80% -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>${jacoco.version}</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals><goal>prepare-agent</goal></goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>verify</phase>
+            <goals><goal>report</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+    </plugins>
+  </build>
+
+  <profiles>
+
+    <!-- WF07 — API automation only -->
+    <profile>
+      <id>api</id>
+      <properties>
+        <surefire.includes.default>**/api/**/*Test.java</surefire.includes.default>
+      </properties>
+    </profile>
+
+    <!-- WF06 — UI automation only -->
+    <profile>
+      <id>ui</id>
+      <properties>
+        <surefire.includes.default>**/ui/**/*Test.java</surefire.includes.default>
+      </properties>
+    </profile>
+
+    <!-- WF04 — BDD runner only -->
+    <profile>
+      <id>bdd</id>
+      <properties>
+        <surefire.includes.default>**/runners/**/*Test.java</surefire.includes.default>
+      </properties>
+    </profile>
+
+    <!-- WF14 — Accessibility only -->
+    <profile>
+      <id>a11y</id>
+      <properties>
+        <surefire.includes.default>**/a11y/**/*Test.java</surefire.includes.default>
+      </properties>
+    </profile>
+
+    <!--
+      WF03 — Optimised subset.
+      The TestOptimizationAgent writes the selected includes into
+      target/selected-tests.txt and the pipeline passes them as -Dselected.tests.
+    -->
+    <profile>
+      <id>selected</id>
+      <properties>
+        <surefire.includes.default>${selected.tests}</surefire.includes.default>
+      </properties>
+    </profile>
+
+    <!--
+      WF12 — Performance.
+      JMeter plans live in src/test/jmeter. Only the LOCAL application under
+      test may be load tested; never a public demo site.
+    -->
+    <profile>
+      <id>perf</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.lazerycode.jmeter</groupId>
+            <artifactId>jmeter-maven-plugin</artifactId>
+            <version>${jmeter.plugin.version}</version>
+            <executions>
+              <execution>
+                <id>configure-jmeter</id>
+                <goals><goal>configure</goal></goals>
+              </execution>
+              <execution>
+                <id>run-jmeter</id>
+                <goals><goal>jmeter</goal></goals>
+              </execution>
+              <execution>
+                <id>verify-jmeter</id>
+                <goals><goal>results</goal></goals>
+              </execution>
+            </executions>
+            <configuration>
+              <testFilesDirectory>${project.basedir}/src/test/jmeter</testFilesDirectory>
+              <generateReports>true</generateReports>
+              <!-- NFR-009: error rate must stay at or below 1% -->
+              <errorRateThresholdInPercent>1</errorRateThresholdInPercent>
+              <propertiesUser>
+                <target.host>localhost</target.host>
+                <target.port>9966</target.port>
+                <target.basepath>/petclinic/api</target.basepath>
+                <users>50</users>
+                <rampup>30</rampup>
+                <duration>300</duration>
+              </propertiesUser>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+  </profiles>
+
+</project>

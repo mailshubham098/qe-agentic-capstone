@@ -1,0 +1,868 @@
+# =============================================================================
+#  QE Agentic Pipeline — Applied AI Specialist Capstone (QE track)
+#  12 agent-gated stages. Place at .github/workflows/qe-agentic-pipeline.yml
+#
+#  Blocking gates come from assets/sample_data/nfr_catalog.csv. A gate marked
+#  blocking fails the run; a gate marked WARN annotates the pull request.
+#
+#  SAFETY: load and chaos stages target only the LOCAL dockerised application.
+#  Public demo applications (SauceDemo, ParaBank, OrangeHRM) are exercised with
+#  functional tests at courteous volume only — never load tested, never attacked.
+# =============================================================================
+name: QE Agentic Pipeline
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Nightly at 01:17 UTC — resilience experiments run out of hours
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      run_full_regression:
+        description: 'Ignore agent test selection and run the full suite'
+        type: boolean
+        default: false
+
+env:
+  JAVA_VERSION: '21'
+  MAVEN_OPTS: '-Dmaven.repo.local=.m2/repository -Dstyle.color=always'
+  EVIDENCE_DIR: evidence
+
+concurrency:
+  group: qe-agentic-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+
+  # ===========================================================================
+  # STAGE 1 — Context sync
+  # Proves the knowledge spine is reachable before anything else runs. If the
+  # context is down, every downstream agent would silently degrade to guessing.
+  # ===========================================================================
+  context-sync:
+    name: '1 · Context sync'
+    runs-on: ubuntu-latest
+    outputs:
+      context_ready: ${{ steps.probe.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Make agent helper executable
+        run: chmod +x assets/ci/invoke_agent.sh
+
+      - name: Probe the QE Industry Context
+        id: probe
+        env:
+          ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
+          ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
+          ICA_CONTEXT_KEY: ${{ secrets.ICA_CONTEXT_KEY }}
+          ICA_CONTEXT_ID: ${{ secrets.ICA_CONTEXT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF01"
+          printf '%s' '{"probe":"list the entities in the QE Test Asset Schema"}' \
+            > /tmp/probe.json
+          ./assets/ci/invoke_agent.sh context-probe /tmp/probe.json \
+            "$EVIDENCE_DIR/WF01/context_probe.json"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf01-context
+          path: evidence/WF01
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 2 — Requirement quality gate                                   (WF02)
+  # Blocking: NFR-001 mean qualityScore >= 70, NFR-002 zero UNTESTABLE criteria
+  # ===========================================================================
+  requirement-quality-gate:
+    name: '2 · Requirement quality gate'
+    needs: context-sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - run: chmod +x assets/ci/invoke_agent.sh
+
+      - name: Collect requirements referenced by this change
+        id: collect
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF02"
+          # Requirement keys are expected in commit messages and the PR title.
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          HEAD="${{ github.sha }}"
+          {
+            git log --pretty=%B "${BASE}..${HEAD}" 2>/dev/null || true
+            printf '%s\n' "${{ github.event.pull_request.title }}"
+          } | grep -oE '[A-Z]{2,10}-[0-9]+' | sort -u > /tmp/req_keys.txt || true
+          if [[ ! -s /tmp/req_keys.txt ]]; then
+            echo "No requirement key found in commits or PR title." | tee /tmp/req_keys.txt
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+          python3 - <<'PY'
+          import json, pathlib
+          keys = [l.strip() for l in pathlib.Path('/tmp/req_keys.txt').read_text().splitlines() if l.strip()]
+          pathlib.Path('/tmp/wf02_payload.json').write_text(json.dumps({'requirement_keys': keys}))
+          PY
+          cat /tmp/req_keys.txt
+
+      - name: Fail when the change references no requirement
+        if: steps.collect.outputs.found != 'true'
+        run: |
+          echo "::error title=Traceability::Every change must reference a requirement key (e.g. QEC-101) in a commit message or the PR title."
+          exit 1
+
+      - name: RequirementQualityAgent
+        env:
+          ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
+          ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
+          ICA_CONTEXT_KEY: ${{ secrets.ICA_CONTEXT_KEY }}
+          ICA_CONTEXT_ID: ${{ secrets.ICA_CONTEXT_ID }}
+        run: |
+          ./assets/ci/invoke_agent.sh requirement-quality \
+            /tmp/wf02_payload.json \
+            "$EVIDENCE_DIR/WF02/requirement_quality_report.json"
+
+      - name: Enforce NFR-001 and NFR-002
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, pathlib
+          p = pathlib.Path(os.environ["EVIDENCE_DIR"]) / "WF02/requirement_quality_report.json"
+          d = json.loads(p.read_text())
+          scores = [r.get("qualityScore", 0) for r in d.get("requirements", [])]
+          untestable = sum(
+              1
+              for r in d.get("requirements", [])
+              for c in r.get("criteria", [])
+              if c.get("testabilityVerdict") == "UNTESTABLE"
+          )
+          mean = sum(scores) / len(scores) if scores else 0
+          print(f"mean qualityScore = {mean:.1f} (NFR-001 threshold 70)")
+          print(f"UNTESTABLE criteria = {untestable} (NFR-002 threshold 0)")
+          failed = False
+          if not scores:
+              print("::error title=NFR-001::agent returned no scored requirements")
+              failed = True
+          if mean < 70:
+              print(f"::error title=NFR-001::mean requirement quality {mean:.1f} is below 70")
+              failed = True
+          if untestable > 0:
+              print(f"::error title=NFR-002::{untestable} untestable acceptance criteria must be rewritten")
+              failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf02-requirements
+          path: evidence/WF02
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 3 — Test design sync                                           (WF02)
+  # Advisory: reports coverage of criteria by approved test cases.
+  # ===========================================================================
+  test-design-sync:
+    name: '3 · Test design sync'
+    needs: requirement-quality-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: chmod +x assets/ci/invoke_agent.sh
+
+      - name: TestCaseDesignAgent — criteria coverage report
+        env:
+          ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
+          ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
+          ICA_CONTEXT_KEY: ${{ secrets.ICA_CONTEXT_KEY }}
+          ICA_CONTEXT_ID: ${{ secrets.ICA_CONTEXT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF02"
+          printf '%s' '{"task":"report acceptance criteria without an approved covering test case"}' \
+            > /tmp/wf03_payload.json
+          ./assets/ci/invoke_agent.sh test-design-coverage /tmp/wf03_payload.json \
+            "$EVIDENCE_DIR/WF02/criteria_coverage.json"
+
+      - name: Annotate uncovered criteria
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path(os.environ["EVIDENCE_DIR"]) / "WF02/criteria_coverage.json"
+          d = json.loads(p.read_text())
+          gaps = d.get("uncovered", [])
+          for g in gaps:
+              print(f"::warning title=Coverage gap::{g.get('acId','?')} — {g.get('reason','no covering test case')}")
+          print(f"{len(gaps)} acceptance criteria have no approved covering test case")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf02-coverage
+          path: evidence/WF02
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 4 — Test optimization                                          (WF03)
+  # The agent selects the subset to run. Its output is a Surefire include
+  # pattern. A P1 case is never de-selected.
+  # ===========================================================================
+  test-optimization:
+    name: '4 · Test optimization'
+    needs: requirement-quality-gate
+    runs-on: ubuntu-latest
+    outputs:
+      selected: ${{ steps.select.outputs.pattern }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: chmod +x assets/ci/invoke_agent.sh
+
+      - name: Compute the changed-file set
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF03"
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          git diff --name-only "${BASE}" "${{ github.sha }}" > /tmp/changed.txt || true
+          python3 - <<'PY'
+          import json, pathlib
+          files = [l.strip() for l in pathlib.Path('/tmp/changed.txt').read_text().splitlines() if l.strip()]
+          pathlib.Path('/tmp/wf04_payload.json').write_text(json.dumps({'changed_files': files}))
+          print(f'{len(files)} changed files')
+          PY
+
+      - name: TestOptimizationAgent
+        id: select
+        env:
+          ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
+          ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
+          ICA_CONTEXT_KEY: ${{ secrets.ICA_CONTEXT_KEY }}
+          ICA_CONTEXT_ID: ${{ secrets.ICA_CONTEXT_ID }}
+        run: |
+          set -euo pipefail
+          ./assets/ci/invoke_agent.sh test-optimization /tmp/wf04_payload.json \
+            "$EVIDENCE_DIR/WF03/selection_report.json"
+          # Full regression on main, on demand, or when the agent is unsure.
+          FORCE="${{ github.event.inputs.run_full_regression || 'false' }}"
+          PATTERN="$(python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path(os.environ["EVIDENCE_DIR"]) / "WF03/selection_report.json"
+          d = json.loads(p.read_text())
+          pats = d.get("surefireIncludes") or []
+          # Safety net: if the agent de-selected everything, run everything.
+          print(",".join(pats) if pats else "**/*Test.java")
+          PY
+          )"
+          if [[ "$FORCE" == "true" || "${{ github.ref }}" == "refs/heads/main" ]]; then
+            PATTERN='**/*Test.java'
+            echo "Full regression forced."
+          fi
+          echo "pattern=$PATTERN" >> "$GITHUB_OUTPUT"
+          echo "Selected: $PATTERN"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf03-optimization
+          path: evidence/WF03
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 5 — Build and unit test
+  # Blocking: NFR-006 line coverage on changed classes >= 80%
+  # ===========================================================================
+  build-and-unit:
+    name: '5 · Build and unit test'
+    needs: test-optimization
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Compile and run unit tests
+        run: mvn -B -ntp clean test -Dsurefire.includes.default='**/unit/**/*Test.java'
+
+      - name: JaCoCo report
+        run: mvn -B -ntp jacoco:report
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: target/site/jacoco
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 6 — Test data provisioning                                     (WF05)
+  # ===========================================================================
+  test-data-provision:
+    name: '6 · Test data provisioning'
+    needs: build-and-unit
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: qecapstone
+          POSTGRES_DB: qedata
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply the agent-generated seed
+        env:
+          PGPASSWORD: qecapstone
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF05"
+          if [[ -f src/test/resources/testdata/seed.sql ]]; then
+            psql -h localhost -U postgres -d qedata \
+              -f src/test/resources/testdata/seed.sql \
+              | tee "$EVIDENCE_DIR/WF05/seed_apply.log"
+          else
+            echo "no seed.sql present — generate it in WF05 before relying on this stage" \
+              | tee "$EVIDENCE_DIR/WF05/seed_apply.log"
+          fi
+
+      - name: Privacy assertion — no real personal data patterns
+        run: |
+          set -euo pipefail
+          # Fails if a value looks like a real card number (Luhn-valid 13-19 digits).
+          python3 - <<'PY'
+          import pathlib, re, sys
+          def luhn(n):
+              d = [int(c) for c in n][::-1]
+              return (sum(d[0::2]) + sum(sum(divmod(x * 2, 10)) for x in d[1::2])) % 10 == 0
+          hits = []
+          for p in pathlib.Path("src/test/resources/testdata").rglob("*") if pathlib.Path("src/test/resources/testdata").exists() else []:
+              if not p.is_file():
+                  continue
+              text = p.read_text(errors="ignore")
+              for m in re.finditer(r"\b\d{13,19}\b", text):
+                  if luhn(m.group()):
+                      hits.append(f"{p}: {m.group()[:4]}…")
+          if hits:
+              for h in hits:
+                  print(f"::error title=NFR-024::Luhn-valid number in test data: {h}")
+              sys.exit(1)
+          print("No Luhn-valid card-like values in test data.")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf05-testdata
+          path: evidence/WF05
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 7 — API automation                                             (WF07)
+  # Blocking: NFR-003 P1 pass rate 100%, NFR-007 zero contract violations
+  # ===========================================================================
+  api-automation:
+    name: '7 · API automation'
+    needs: test-data-provision
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Start the PetClinic REST application under test
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/spring-petclinic/spring-petclinic-rest.git /tmp/aut-api
+          (cd /tmp/aut-api && ./mvnw -B -ntp -q -DskipTests package)
+          nohup java -jar /tmp/aut-api/target/*.jar > /tmp/aut-api.log 2>&1 &
+          # Wait for readiness rather than sleeping a fixed time.
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:9966/petclinic/api/pettypes > /dev/null; then
+              echo "AUT is up after ${i}s"; break
+            fi
+            if [[ $i -eq 60 ]]; then
+              echo "AUT failed to start"; tail -50 /tmp/aut-api.log; exit 1
+            fi
+            sleep 1
+          done
+
+      - name: REST Assured suites
+        run: |
+          mvn -B -ntp verify -Papi \
+            -Daut.petclinic.api.url=http://localhost:9966/petclinic/api
+
+      - name: Collect evidence
+        if: always()
+        run: |
+          mkdir -p "$EVIDENCE_DIR/WF07"
+          cp -r target/surefire-reports "$EVIDENCE_DIR/WF07/" 2>/dev/null || true
+          tail -200 /tmp/aut-api.log > "$EVIDENCE_DIR/WF07/aut_api.log" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf07-api
+          path: evidence/WF07
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 8 — BDD and UI automation                                (WF04, WF06)
+  # Blocking: NFR-003, NFR-004 overall pass rate >= 98%, NFR-005 no new flakes
+  # ===========================================================================
+  bdd-ui-automation:
+    name: '8 · BDD and UI automation'
+    needs: [test-optimization, api-automation]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Install Playwright browsers
+        run: mvn -B -ntp -q exec:java -e
+             -Dexec.mainClass=com.microsoft.playwright.CLI
+             -Dexec.args="install --with-deps chromium"
+        continue-on-error: true
+
+      - name: Start the PetClinic UI application under test
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/spring-projects/spring-petclinic.git /tmp/aut-ui
+          (cd /tmp/aut-ui && ./mvnw -B -ntp -q -DskipTests package)
+          nohup java -jar /tmp/aut-ui/target/*.jar > /tmp/aut-ui.log 2>&1 &
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:8080 > /dev/null; then
+              echo "UI AUT is up after ${i}s"; break
+            fi
+            if [[ $i -eq 90 ]]; then
+              echo "UI AUT failed to start"; tail -50 /tmp/aut-ui.log; exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Run the agent-selected UI and BDD suites
+        run: |
+          mvn -B -ntp verify \
+            -Dsurefire.includes.default='${{ needs.test-optimization.outputs.selected }}' \
+            -Daut.petclinic.ui.url=http://localhost:8080
+
+      - name: Flakiness check — NFR-005, three consecutive runs of changed tests
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF03"
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          CHANGED_TESTS="$(git diff --name-only "${BASE}" "${{ github.sha }}" \
+            | grep -E 'src/test/java/.*Test\.java$' || true)"
+          if [[ -z "$CHANGED_TESTS" ]]; then
+            echo "No test sources changed; flakiness check not applicable." \
+              | tee "$EVIDENCE_DIR/WF03/flakiness_report.md"
+            exit 0
+          fi
+          PATTERN="$(echo "$CHANGED_TESTS" | sed 's#src/test/java/##' | paste -sd, -)"
+          echo "# Flakiness report" > "$EVIDENCE_DIR/WF03/flakiness_report.md"
+          echo "Changed tests: $PATTERN" >> "$EVIDENCE_DIR/WF03/flakiness_report.md"
+          FAILED=0
+          for run in 1 2 3; do
+            if mvn -B -ntp test -Dsurefire.includes.default="$PATTERN" \
+                 -Daut.petclinic.ui.url=http://localhost:8080 > "/tmp/flake_$run.log" 2>&1; then
+              echo "- run $run: PASS" >> "$EVIDENCE_DIR/WF03/flakiness_report.md"
+            else
+              echo "- run $run: FAIL" >> "$EVIDENCE_DIR/WF03/flakiness_report.md"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+          if [[ $FAILED -gt 0 && $FAILED -lt 3 ]]; then
+            echo "::error title=NFR-005::Changed tests produced inconsistent results across 3 runs — flaky"
+            exit 1
+          fi
+          if [[ $FAILED -eq 3 ]]; then
+            echo "::error title=NFR-003::Changed tests failed consistently"
+            exit 1
+          fi
+          echo "Deterministic across 3 runs."
+
+      - name: Collect evidence
+        if: always()
+        run: |
+          mkdir -p "$EVIDENCE_DIR/WF06"
+          cp -r target/surefire-reports "$EVIDENCE_DIR/WF06/" 2>/dev/null || true
+          cp target/cucumber-report.html "$EVIDENCE_DIR/WF06/" 2>/dev/null || true
+          cp target/cucumber.json "$EVIDENCE_DIR/WF06/" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf06-ui-bdd
+          path: |
+            evidence/WF06
+            evidence/WF03
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 9 — Performance smoke                                          (WF12)
+  # Blocking: NFR-008 p95 <= 1200ms, NFR-009 error rate <= 1%, NFR-010 >= 40 rps
+  # LOCAL application only.
+  # ===========================================================================
+  performance-smoke:
+    name: '9 · Performance smoke'
+    needs: api-automation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Start the local application under test
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/spring-petclinic/spring-petclinic-rest.git /tmp/aut-perf
+          (cd /tmp/aut-perf && ./mvnw -B -ntp -q -DskipTests package)
+          nohup java -jar /tmp/aut-perf/target/*.jar > /tmp/aut-perf.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:9966/petclinic/api/pettypes > /dev/null && break
+            [[ $i -eq 60 ]] && { echo "AUT failed to start"; exit 1; }
+            sleep 1
+          done
+
+      - name: JMeter run — shortened profile on pull requests
+        run: |
+          set -euo pipefail
+          DURATION=300; USERS=50
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            DURATION=60; USERS=25
+            echo "::notice title=Reduced profile::Pull request run uses ${USERS} users for ${DURATION}s. The full ${DURATION}s/50-user profile runs on main and nightly."
+          fi
+          mvn -B -ntp verify -Pperf \
+            -Djmeter.target.host=localhost \
+            -Djmeter.users="$USERS" \
+            -Djmeter.duration="$DURATION"
+
+      - name: Enforce NFR-008, NFR-009 and NFR-010
+        run: |
+          python3 assets/ci/check_jmeter_thresholds.py \
+            --results-dir target/jmeter/results \
+            --p95-ms 1200 --error-rate-pct 1 --min-throughput 40 \
+            --output "$EVIDENCE_DIR/WF12/jmeter_summary.csv"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf12-performance
+          path: |
+            evidence/WF12
+            target/jmeter
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 10 — Accessibility scan                                        (WF14)
+  # Blocking: NFR-017 zero critical, NFR-019 keyboard operable, NFR-020 labels
+  # Warn: NFR-018 serious <= 5, NFR-021 contrast
+  # ===========================================================================
+  accessibility-scan:
+    name: '10 · Accessibility scan'
+    needs: build-and-unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install axe CLI
+        run: npm install -g @axe-core/cli@4.13.0
+
+      - name: Start the local application under test
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/spring-projects/spring-petclinic.git /tmp/aut-a11y
+          (cd /tmp/aut-a11y && ./mvnw -B -ntp -q -DskipTests package)
+          nohup java -jar /tmp/aut-a11y/target/*.jar > /tmp/aut-a11y.log 2>&1 &
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:8080 > /dev/null && break
+            [[ $i -eq 90 ]] && { echo "AUT failed to start"; exit 1; }
+            sleep 1
+          done
+
+      - name: axe scan of the local journey
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF14"
+          axe http://localhost:8080 http://localhost:8080/owners/find http://localhost:8080/vets.html \
+            --save "$EVIDENCE_DIR/WF14/axe_report.json" \
+            --exit || true
+
+      - name: Detector self-check against a known non-conformant page
+        run: |
+          set -euo pipefail
+          # NFR-022: if the scanner reports the W3C BAD "before" page as clean,
+          # the scanner is broken and every other clean result is meaningless.
+          axe https://www.w3.org/WAI/demos/bad/before/home.html \
+            --save "$EVIDENCE_DIR/WF14/axe_baseline_bad.json" || true
+          python3 - <<'PY'
+          import json, os, pathlib, sys
+          p = pathlib.Path(os.environ["EVIDENCE_DIR"]) / "WF14/axe_baseline_bad.json"
+          if not p.exists():
+              print("::error title=NFR-022::baseline scan produced no output — scanner unusable")
+              sys.exit(1)
+          data = json.loads(p.read_text())
+          runs = data if isinstance(data, list) else [data]
+          total = sum(len(r.get("violations", [])) for r in runs)
+          print(f"baseline violations detected = {total} (NFR-022 expects >= 10)")
+          if total < 10:
+              print("::error title=NFR-022::scanner did not detect the known violations on the reference page")
+              sys.exit(1)
+          PY
+
+      - name: Java accessibility suites — keyboard walk and labelling
+        run: mvn -B -ntp verify -Pa11y -Daut.petclinic.ui.url=http://localhost:8080
+
+      - name: Enforce NFR-017, NFR-018 and NFR-020
+        run: |
+          python3 assets/ci/check_axe_thresholds.py \
+            --report "$EVIDENCE_DIR/WF14/axe_report.json" \
+            --max-critical 0 --max-serious 5
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf14-accessibility
+          path: evidence/WF14
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 11 — Resilience experiment                                     (WF13)
+  # Nightly and on main only. Blocking: NFR-012 to NFR-015.
+  # LOCAL dockerised stack only — never a public or shared environment.
+  # ===========================================================================
+  resilience-experiment:
+    name: '11 · Resilience experiment'
+    needs: build-and-unit
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Chaos Toolkit
+        run: |
+          python -m pip install --upgrade pip
+          pip install chaostoolkit==1.20.0 chaostoolkit-lib
+
+      - name: Bring up the dockerised stack
+        run: |
+          set -euo pipefail
+          docker compose -f src/test/resources/chaos/docker-compose.yml up -d
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:9966/petclinic/api/pettypes > /dev/null && break
+            [[ $i -eq 90 ]] && { docker compose -f src/test/resources/chaos/docker-compose.yml logs; exit 1; }
+            sleep 1
+          done
+
+      - name: Run the chaos experiment
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF13"
+          chaos run src/test/resources/chaos/experiment-db-pause.json \
+            --journal-path "$EVIDENCE_DIR/WF13/chaos_journal.json"
+
+      - name: Data integrity invariants — NFR-013 and NFR-014
+        run: |
+          mvn -B -ntp verify -Dsurefire.includes.default='**/resilience/**/*Test.java' \
+            | tee "$EVIDENCE_DIR/WF13/integrity_check.txt"
+
+      - name: Enforce NFR-012 and NFR-015
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, sys
+          p = pathlib.Path(os.environ["EVIDENCE_DIR"]) / "WF13/chaos_journal.json"
+          j = json.loads(p.read_text())
+          status = j.get("status")
+          deviated = j.get("deviated", True)
+          print(f"chaos status={status} deviated={deviated}")
+          if status != "completed" or deviated:
+              print("::error title=NFR-012::steady-state hypothesis did not hold after fault injection")
+              sys.exit(1)
+          PY
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f src/test/resources/chaos/docker-compose.yml down -v || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf13-resilience
+          path: evidence/WF13
+          retention-days: 30
+
+  # ===========================================================================
+  # STAGE 12 — Defect triage and release gate                 (WF08, WF09, gate)
+  # Runs even when upstream stages failed: failures are exactly what the triage
+  # agent exists to classify. Blocking: NFR-023 zero open S1 defects.
+  # ===========================================================================
+  defect-triage-and-release-gate:
+    name: '12 · Defect triage and release gate'
+    needs:
+      - api-automation
+      - bdd-ui-automation
+      - performance-smoke
+      - accessibility-scan
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: chmod +x assets/ci/invoke_agent.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence
+          merge-multiple: true
+
+      - name: Assemble the failure set for triage
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF08"
+          python3 assets/ci/collect_failures.py \
+            --evidence-dir evidence \
+            --output /tmp/wf08_payload.json
+          cat /tmp/wf08_payload.json | head -40
+
+      - name: DefectTriageAgent
+        env:
+          ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
+          ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
+          ICA_CONTEXT_KEY: ${{ secrets.ICA_CONTEXT_KEY }}
+          ICA_CONTEXT_ID: ${{ secrets.ICA_CONTEXT_ID }}
+        run: |
+          ./assets/ci/invoke_agent.sh defect-triage /tmp/wf08_payload.json \
+            "$EVIDENCE_DIR/WF08/triage_report.json"
+
+      - name: DefectPredictionAgent — advisory risk forecast
+        env:
+          ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
+          ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
+          ICA_CONTEXT_KEY: ${{ secrets.ICA_CONTEXT_KEY }}
+          ICA_CONTEXT_ID: ${{ secrets.ICA_CONTEXT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/WF09"
+          printf '%s' '{"task":"forecast defect-prone components for the current change set"}' \
+            > /tmp/wf09_payload.json
+          ./assets/ci/invoke_agent.sh defect-prediction /tmp/wf09_payload.json \
+            "$EVIDENCE_DIR/WF09/prediction_report.json"
+
+      - name: ReleaseGateAgent — consolidated verdict
+        env:
+          ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
+          ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
+          ICA_CONTEXT_KEY: ${{ secrets.ICA_CONTEXT_KEY }}
+          ICA_CONTEXT_ID: ${{ secrets.ICA_CONTEXT_ID }}
+        run: |
+          set -euo pipefail
+          python3 assets/ci/build_gate_payload.py \
+            --evidence-dir evidence \
+            --nfr-catalog assets/sample_data/nfr_catalog.csv \
+            --output /tmp/gate_payload.json
+          ./assets/ci/invoke_agent.sh release-gate /tmp/gate_payload.json \
+            "$EVIDENCE_DIR/WF08/release_gate_verdict.json"
+
+      - name: Publish the verdict to the pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'evidence/WF08/release_gate_verdict.json';
+            let body = '## QE Agentic Release Gate\n\n';
+            try {
+              const v = JSON.parse(fs.readFileSync(path, 'utf8'));
+              const icon = { PASS: '✅', WARN: '⚠️', FAIL: '❌' }[v.verdict] || 'ℹ️';
+              body += `${icon} **Verdict: ${v.verdict ?? 'UNKNOWN'}**\n\n`;
+              body += `${v.summary ?? ''}\n\n`;
+              if (Array.isArray(v.findings) && v.findings.length) {
+                body += '| Gate | Result | Detail |\n|---|---|---|\n';
+                for (const f of v.findings.slice(0, 30)) {
+                  body += `| ${f.gate ?? '?'} | ${f.result ?? '?'} | ${(f.detail ?? '').replace(/\|/g, '\\|')} |\n`;
+                }
+              }
+              body += '\n> Advisory output. A Quality Engineer owns the release decision.\n';
+            } catch (e) {
+              body += `Gate verdict unavailable: ${e.message}\n`;
+            }
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Enforce NFR-023 and the consolidated verdict
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, sys
+          p = pathlib.Path(os.environ["EVIDENCE_DIR"]) / "WF08/release_gate_verdict.json"
+          v = json.loads(p.read_text())
+          verdict = v.get("verdict", "FAIL")
+          open_s1 = int(v.get("openS1Defects", 0))
+          print(f"verdict={verdict} openS1Defects={open_s1}")
+          if open_s1 > 0:
+              print(f"::error title=NFR-023::{open_s1} open S1 defect(s) block this release")
+              sys.exit(1)
+          if verdict == "FAIL":
+              print("::error title=Release gate::consolidated verdict is FAIL")
+              sys.exit(1)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-wf08-wf09-gate
+          path: |
+            evidence/WF08
+            evidence/WF09
+          retention-days: 90
