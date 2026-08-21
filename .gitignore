@@ -1,4 +1,4 @@
-# Secrets — never commit
+ï»¿# Secrets - never commit
 .bob/mcp.json
 
 # Build output
@@ -11,3 +11,6 @@ target/
 # Python
 __pycache__/
 .venv/
+
+# Nested duplicate created by workspace checkout - not part of the repo
+qe-agentic-capstone/

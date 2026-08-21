@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logback configuration for the test compile scope.
+  Keeps CI output clean: INFO and above go to stdout; noisy framework packages
+  are suppressed to WARN.
+-->
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Suppress verbose output from test libraries -->
+  <logger name="io.restassured"           level="WARN"/>
+  <logger name="org.seleniumhq"           level="WARN"/>
+  <logger name="com.microsoft.playwright" level="WARN"/>
+  <logger name="io.cucumber"              level="WARN"/>
+  <logger name="org.testcontainers"       level="WARN"/>
+  <logger name="com.github.dockerjava"    level="WARN"/>
+
+  <root level="INFO">
+    <appender-ref ref="STDOUT"/>
+  </root>
+</configuration>
