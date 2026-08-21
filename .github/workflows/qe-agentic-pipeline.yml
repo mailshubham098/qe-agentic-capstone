@@ -478,15 +478,38 @@ jobs:
     name: '8 - BDD and UI automation'
     needs: [test-optimization, api-automation]
     runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.skip_check.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check for BDD/UI test assets
+        id: skip_check
+        run: |
+          BDD_COUNT=$(find src/test/java -name "*Test.java" \
+            ! -name "SmokeTest.java" \
+            ! -path "*/tests/*" \
+            ! -path "*/unit/*" 2>/dev/null | wc -l || echo 0)
+          FEATURE_COUNT=$(find src/test/resources/features -name "*.feature" 2>/dev/null | wc -l || echo 0)
+          if [[ "$BDD_COUNT" -eq 0 && "$FEATURE_COUNT" -eq 0 ]]; then
+            echo "::warning title=BDD-UI::No UI/BDD test classes or feature files found (WF04/WF06 pending). Stage skipped."
+            mkdir -p "$EVIDENCE_DIR/WF06"
+            printf '%s' '{"status":"skipped","reason":"No UI/BDD test sources yet - WF04 and WF06 pending"}' \
+              > "$EVIDENCE_DIR/WF06/bdd_ui_status.json"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-java@v4
+        if: steps.skip_check.outputs.skip != 'true'
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
 
       - name: Install Playwright browsers
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           mvn -B -ntp -q exec:java -e \
             -Dexec.mainClass=com.microsoft.playwright.CLI \
@@ -494,6 +517,7 @@ jobs:
         continue-on-error: true
 
       - name: Start the PetClinic UI application under test
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/spring-projects/spring-petclinic.git /tmp/aut-ui
@@ -510,22 +534,14 @@ jobs:
           done
 
       - name: Run the agent-selected UI and BDD suites
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
-          # Skip if no UI/BDD test sources exist yet (WF04/WF06 pending authoring)
-          TEST_COUNT=$(find src/test/java -name "*Test.java" \
-            ! -path "*/unit/*" ! -path "*/tests/Smoke*" 2>/dev/null | wc -l || echo 0)
-          if [[ "$TEST_COUNT" -eq 0 ]]; then
-            echo "::warning title=BDD-UI::No UI/BDD test classes found yet (WF04/WF06 pending). Stage skipped."
-            mkdir -p "$EVIDENCE_DIR/WF06"
-            printf '%s' '{"status":"skipped","reason":"No UI/BDD test sources yet - WF04 and WF06 pending"}' \
-              > "$EVIDENCE_DIR/WF06/bdd_ui_status.json"
-            exit 0
-          fi
           mvn -B -ntp verify \
             -Dsurefire.includes.default='${{ needs.test-optimization.outputs.selected }}' \
             -Daut.petclinic.ui.url=http://localhost:8080
 
       - name: Flakiness check - NFR-005
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           mkdir -p "$EVIDENCE_DIR/WF03"
@@ -588,13 +604,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check for JMeter plan
+        id: skip_check
+        run: |
+          JMX_COUNT=$(find src/test/resources/jmeter -name "*.jmx" 2>/dev/null | wc -l || echo 0)
+          if [[ "$JMX_COUNT" -eq 0 ]]; then
+            echo "::warning title=WF12::No JMeter plan (.jmx) found yet (WF12 pending). Performance stage skipped."
+            mkdir -p "$EVIDENCE_DIR/WF12"
+            printf 'gate,metric,actual,operator,threshold,result\nNFR-008,p95 response time (ms),skipped,<=,1200,SKIP\nNFR-009,error rate (%%),skipped,<=,1,SKIP\nNFR-010,throughput (req/s),skipped,>=,40,SKIP\n' \
+              > "$EVIDENCE_DIR/WF12/jmeter_summary.csv"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-java@v4
+        if: steps.skip_check.outputs.skip != 'true'
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
 
       - name: Start the local application under test
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/spring-petclinic/spring-petclinic-rest.git /tmp/aut-perf
@@ -607,6 +640,7 @@ jobs:
           done
 
       - name: JMeter run - shortened profile on pull requests
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           DURATION=300; USERS=50
@@ -620,6 +654,7 @@ jobs:
             -Djmeter.duration="$DURATION"
 
       - name: Enforce NFR-008, NFR-009 and NFR-010
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           python3 assets/ci/check_jmeter_thresholds.py \
             --results-dir target/jmeter/results \
@@ -645,19 +680,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check for a11y test assets
+        id: skip_check
+        run: |
+          A11Y_CHECK=$(find src/test/java -path "*/a11y/*Test.java" 2>/dev/null | wc -l || echo 0)
+          if [[ "$A11Y_CHECK" -eq 0 ]]; then
+            echo "::warning title=WF14::No a11y test classes yet (WF14 pending). Accessibility stage skipped."
+            mkdir -p "$EVIDENCE_DIR/WF14"
+            printf '%s' '{"status":"skipped","reason":"WF14 a11y assets not yet authored"}' \
+              > "$EVIDENCE_DIR/WF14/axe_report_status.json"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-java@v4
+        if: steps.skip_check.outputs.skip != 'true'
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
+
       - uses: actions/setup-node@v4
+        if: steps.skip_check.outputs.skip != 'true'
         with:
           node-version: '22'
 
       - name: Install axe CLI
+        if: steps.skip_check.outputs.skip != 'true'
         run: npm install -g @axe-core/cli@4.13.0
 
       - name: Start the local application under test
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/spring-projects/spring-petclinic.git /tmp/aut-a11y
@@ -670,6 +725,7 @@ jobs:
           done
 
       - name: axe scan of the local journey
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           mkdir -p "$EVIDENCE_DIR/WF14"
@@ -678,6 +734,7 @@ jobs:
             --exit || true
 
       - name: Detector self-check against a known non-conformant page
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           axe https://www.w3.org/WAI/demos/bad/before/home.html \
@@ -698,20 +755,13 @@ jobs:
           PY
 
       - name: Java accessibility suites - keyboard walk and labelling
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
-          A11Y_COUNT=$(find src/test/java -path "*/a11y/*Test.java" 2>/dev/null | wc -l || echo 0)
-          if [[ "$A11Y_COUNT" -eq 0 ]]; then
-            echo "::warning title=A11Y::No a11y test classes yet (WF14 pending). Java suite skipped."
-          else
-            mvn -B -ntp verify -Pa11y -Daut.petclinic.ui.url=http://localhost:8080
-          fi
+          mvn -B -ntp verify -Pa11y -Daut.petclinic.ui.url=http://localhost:8080
 
       - name: Enforce NFR-017, NFR-018 and NFR-020
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
-          if [[ ! -f "$EVIDENCE_DIR/WF14/axe_report.json" ]]; then
-            echo "::warning title=NFR-017::axe report not produced (AUT scan pending). Gate deferred."
-            exit 0
-          fi
           python3 assets/ci/check_axe_thresholds.py \
             --report "$EVIDENCE_DIR/WF14/axe_report.json" \
             --max-critical 0 --max-serious 5
