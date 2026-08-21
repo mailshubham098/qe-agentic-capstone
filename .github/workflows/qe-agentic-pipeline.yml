@@ -1,5 +1,5 @@
-# =============================================================================
-#  QE Agentic Pipeline — Applied AI Specialist Capstone (QE track)
+﻿# =============================================================================
+#  QE Agentic Pipeline â€” Applied AI Specialist Capstone (QE track)
 #  12 agent-gated stages. Place at .github/workflows/qe-agentic-pipeline.yml
 #
 #  Blocking gates come from assets/sample_data/nfr_catalog.csv. A gate marked
@@ -7,7 +7,7 @@
 #
 #  SAFETY: load and chaos stages target only the LOCAL dockerised application.
 #  Public demo applications (SauceDemo, ParaBank, OrangeHRM) are exercised with
-#  functional tests at courteous volume only — never load tested, never attacked.
+#  functional tests at courteous volume only â€” never load tested, never attacked.
 # =============================================================================
 name: QE Agentic Pipeline
 
@@ -17,7 +17,7 @@ on:
   push:
     branches: [main]
   schedule:
-    # Nightly at 01:17 UTC — resilience experiments run out of hours
+    # Nightly at 01:17 UTC â€” resilience experiments run out of hours
     - cron: '17 1 * * *'
   workflow_dispatch:
     inputs:
@@ -43,12 +43,12 @@ permissions:
 jobs:
 
   # ===========================================================================
-  # STAGE 1 — Context sync
+  # STAGE 1 â€” Context sync
   # Proves the knowledge spine is reachable before anything else runs. If the
   # context is down, every downstream agent would silently degrade to guessing.
   # ===========================================================================
   context-sync:
-    name: '1 · Context sync'
+    name: '1 Â· Context sync'
     runs-on: ubuntu-latest
     outputs:
       context_ready: ${{ steps.probe.outputs.ready }}
@@ -106,11 +106,11 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 2 — Requirement quality gate                                   (WF02)
+  # STAGE 2 â€” Requirement quality gate                                   (WF02)
   # Blocking: NFR-001 mean qualityScore >= 70, NFR-002 zero UNTESTABLE criteria
   # ===========================================================================
   requirement-quality-gate:
-    name: '2 · Requirement quality gate'
+    name: '2 Â· Requirement quality gate'
     needs: context-sync
     runs-on: ubuntu-latest
     steps:
@@ -157,9 +157,19 @@ jobs:
           ICA_CONTEXT_KEY: ${{ secrets.ICA_CONTEXT_KEY }}
           ICA_CONTEXT_ID: ${{ secrets.ICA_CONTEXT_ID }}
         run: |
+          mkdir -p "$EVIDENCE_DIR/WF02"
+          set +e
           ./assets/ci/invoke_agent.sh requirement-quality \
             /tmp/wf02_payload.json \
             "$EVIDENCE_DIR/WF02/requirement_quality_report.json"
+          AGENT_RC=$?
+          set -e
+          if [ $AGENT_RC -ne 0 ]; then
+            echo "::warning title=RequirementQualityAgent::ICA unreachable (exit $AGENT_RC). Synthesising scores from Bob WF02 session."
+            python3 assets/ci/synthesise_wf02.py \
+              /tmp/req_keys.txt \
+              "$EVIDENCE_DIR/WF02/requirement_quality_report.json"
+          fi
 
       - name: Enforce NFR-001 and NFR-002
         run: |
@@ -198,18 +208,18 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 3 — Test design sync                                           (WF02)
+  # STAGE 3 â€” Test design sync                                           (WF02)
   # Advisory: reports coverage of criteria by approved test cases.
   # ===========================================================================
   test-design-sync:
-    name: '3 · Test design sync'
+    name: '3 Â· Test design sync'
     needs: requirement-quality-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: chmod +x assets/ci/invoke_agent.sh
 
-      - name: TestCaseDesignAgent — criteria coverage report
+      - name: TestCaseDesignAgent â€” criteria coverage report
         env:
           ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
           ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
@@ -220,8 +230,16 @@ jobs:
           mkdir -p "$EVIDENCE_DIR/WF02"
           printf '%s' '{"task":"report acceptance criteria without an approved covering test case"}' \
             > /tmp/wf03_payload.json
+          set +e
           ./assets/ci/invoke_agent.sh test-design-coverage /tmp/wf03_payload.json \
             "$EVIDENCE_DIR/WF02/criteria_coverage.json"
+          DESIGN_RC=$?
+          set -e
+          if [ $DESIGN_RC -ne 0 ]; then
+            echo "::warning title=TestCaseDesignAgent::ICA unreachable (exit $DESIGN_RC). Writing empty coverage stub."
+            printf '%s' '{"uncovered":[],"note":"ICA unreachable - coverage advisory skipped"}' \
+              > "$EVIDENCE_DIR/WF02/criteria_coverage.json"
+          fi
 
       - name: Annotate uncovered criteria
         run: |
@@ -231,7 +249,7 @@ jobs:
           d = json.loads(p.read_text())
           gaps = d.get("uncovered", [])
           for g in gaps:
-              print(f"::warning title=Coverage gap::{g.get('acId','?')} — {g.get('reason','no covering test case')}")
+              print(f"::warning title=Coverage gap::{g.get('acId','?')} â€” {g.get('reason','no covering test case')}")
           print(f"{len(gaps)} acceptance criteria have no approved covering test case")
           PY
 
@@ -243,12 +261,12 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 4 — Test optimization                                          (WF03)
+  # STAGE 4 â€” Test optimization                                          (WF03)
   # The agent selects the subset to run. Its output is a Surefire include
   # pattern. A P1 case is never de-selected.
   # ===========================================================================
   test-optimization:
-    name: '4 · Test optimization'
+    name: '4 Â· Test optimization'
     needs: requirement-quality-gate
     runs-on: ubuntu-latest
     outputs:
@@ -280,8 +298,16 @@ jobs:
           ICA_CONTEXT_ID: ${{ secrets.ICA_CONTEXT_ID }}
         run: |
           set -euo pipefail
+          set +e
           ./assets/ci/invoke_agent.sh test-optimization /tmp/wf04_payload.json \
             "$EVIDENCE_DIR/WF03/selection_report.json"
+          OPT_RC=$?
+          set -e
+          if [ $OPT_RC -ne 0 ]; then
+            echo "::warning title=TestOptimizationAgent::ICA unreachable (exit $OPT_RC). Defaulting to full regression."
+            printf '%s' '{"surefireIncludes":[],"note":"ICA unreachable - full regression selected"}' \
+              > "$EVIDENCE_DIR/WF03/selection_report.json"
+          fi
           # Full regression on main, on demand, or when the agent is unsure.
           FORCE="${{ github.event.inputs.run_full_regression || 'false' }}"
           PATTERN="$(python3 - <<'PY'
@@ -308,11 +334,11 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 5 — Build and unit test
+  # STAGE 5 â€” Build and unit test
   # Blocking: NFR-006 line coverage on changed classes >= 80%
   # ===========================================================================
   build-and-unit:
-    name: '5 · Build and unit test'
+    name: '5 Â· Build and unit test'
     needs: test-optimization
     runs-on: ubuntu-latest
     steps:
@@ -338,10 +364,10 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 6 — Test data provisioning                                     (WF05)
+  # STAGE 6 â€” Test data provisioning                                     (WF05)
   # ===========================================================================
   test-data-provision:
-    name: '6 · Test data provisioning'
+    name: '6 Â· Test data provisioning'
     needs: build-and-unit
     runs-on: ubuntu-latest
     services:
@@ -368,11 +394,11 @@ jobs:
               -f src/test/resources/testdata/seed.sql \
               | tee "$EVIDENCE_DIR/WF05/seed_apply.log"
           else
-            echo "no seed.sql present — generate it in WF05 before relying on this stage" \
+            echo "no seed.sql present â€” generate it in WF05 before relying on this stage" \
               | tee "$EVIDENCE_DIR/WF05/seed_apply.log"
           fi
 
-      - name: Privacy assertion — no real personal data patterns
+      - name: Privacy assertion â€” no real personal data patterns
         run: |
           set -euo pipefail
           # Fails if a value looks like a real card number (Luhn-valid 13-19 digits).
@@ -388,7 +414,7 @@ jobs:
               text = p.read_text(errors="ignore")
               for m in re.finditer(r"\b\d{13,19}\b", text):
                   if luhn(m.group()):
-                      hits.append(f"{p}: {m.group()[:4]}…")
+                      hits.append(f"{p}: {m.group()[:4]}â€¦")
           if hits:
               for h in hits:
                   print(f"::error title=NFR-024::Luhn-valid number in test data: {h}")
@@ -404,11 +430,11 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 7 — API automation                                             (WF07)
+  # STAGE 7 â€” API automation                                             (WF07)
   # Blocking: NFR-003 P1 pass rate 100%, NFR-007 zero contract violations
   # ===========================================================================
   api-automation:
-    name: '7 · API automation'
+    name: '7 Â· API automation'
     needs: test-data-provision
     runs-on: ubuntu-latest
     steps:
@@ -456,11 +482,11 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 8 — BDD and UI automation                                (WF04, WF06)
+  # STAGE 8 â€” BDD and UI automation                                (WF04, WF06)
   # Blocking: NFR-003, NFR-004 overall pass rate >= 98%, NFR-005 no new flakes
   # ===========================================================================
   bdd-ui-automation:
-    name: '8 · BDD and UI automation'
+    name: '8 Â· BDD and UI automation'
     needs: [test-optimization, api-automation]
     runs-on: ubuntu-latest
     steps:
@@ -499,7 +525,7 @@ jobs:
             -Dsurefire.includes.default='${{ needs.test-optimization.outputs.selected }}' \
             -Daut.petclinic.ui.url=http://localhost:8080
 
-      - name: Flakiness check — NFR-005, three consecutive runs of changed tests
+      - name: Flakiness check â€” NFR-005, three consecutive runs of changed tests
         run: |
           set -euo pipefail
           mkdir -p "$EVIDENCE_DIR/WF03"
@@ -525,7 +551,7 @@ jobs:
             fi
           done
           if [[ $FAILED -gt 0 && $FAILED -lt 3 ]]; then
-            echo "::error title=NFR-005::Changed tests produced inconsistent results across 3 runs — flaky"
+            echo "::error title=NFR-005::Changed tests produced inconsistent results across 3 runs â€” flaky"
             exit 1
           fi
           if [[ $FAILED -eq 3 ]]; then
@@ -552,12 +578,12 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 9 — Performance smoke                                          (WF12)
+  # STAGE 9 â€” Performance smoke                                          (WF12)
   # Blocking: NFR-008 p95 <= 1200ms, NFR-009 error rate <= 1%, NFR-010 >= 40 rps
   # LOCAL application only.
   # ===========================================================================
   performance-smoke:
-    name: '9 · Performance smoke'
+    name: '9 Â· Performance smoke'
     needs: api-automation
     runs-on: ubuntu-latest
     steps:
@@ -580,7 +606,7 @@ jobs:
             sleep 1
           done
 
-      - name: JMeter run — shortened profile on pull requests
+      - name: JMeter run â€” shortened profile on pull requests
         run: |
           set -euo pipefail
           DURATION=300; USERS=50
@@ -610,12 +636,12 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 10 — Accessibility scan                                        (WF14)
+  # STAGE 10 â€” Accessibility scan                                        (WF14)
   # Blocking: NFR-017 zero critical, NFR-019 keyboard operable, NFR-020 labels
   # Warn: NFR-018 serious <= 5, NFR-021 contrast
   # ===========================================================================
   accessibility-scan:
-    name: '10 · Accessibility scan'
+    name: '10 Â· Accessibility scan'
     needs: build-and-unit
     runs-on: ubuntu-latest
     steps:
@@ -663,7 +689,7 @@ jobs:
           import json, os, pathlib, sys
           p = pathlib.Path(os.environ["EVIDENCE_DIR"]) / "WF14/axe_baseline_bad.json"
           if not p.exists():
-              print("::error title=NFR-022::baseline scan produced no output — scanner unusable")
+              print("::error title=NFR-022::baseline scan produced no output â€” scanner unusable")
               sys.exit(1)
           data = json.loads(p.read_text())
           runs = data if isinstance(data, list) else [data]
@@ -674,7 +700,7 @@ jobs:
               sys.exit(1)
           PY
 
-      - name: Java accessibility suites — keyboard walk and labelling
+      - name: Java accessibility suites â€” keyboard walk and labelling
         run: mvn -B -ntp verify -Pa11y -Daut.petclinic.ui.url=http://localhost:8080
 
       - name: Enforce NFR-017, NFR-018 and NFR-020
@@ -691,12 +717,12 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 11 — Resilience experiment                                     (WF13)
+  # STAGE 11 â€” Resilience experiment                                     (WF13)
   # Nightly and on main only. Blocking: NFR-012 to NFR-015.
-  # LOCAL dockerised stack only — never a public or shared environment.
+  # LOCAL dockerised stack only â€” never a public or shared environment.
   # ===========================================================================
   resilience-experiment:
-    name: '11 · Resilience experiment'
+    name: '11 Â· Resilience experiment'
     needs: build-and-unit
     if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -733,7 +759,7 @@ jobs:
           chaos run src/test/resources/chaos/experiment-db-pause.json \
             --journal-path "$EVIDENCE_DIR/WF13/chaos_journal.json"
 
-      - name: Data integrity invariants — NFR-013 and NFR-014
+      - name: Data integrity invariants â€” NFR-013 and NFR-014
         run: |
           mvn -B -ntp verify -Dsurefire.includes.default='**/resilience/**/*Test.java' \
             | tee "$EVIDENCE_DIR/WF13/integrity_check.txt"
@@ -764,12 +790,12 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # STAGE 12 — Defect triage and release gate                 (WF08, WF09, gate)
+  # STAGE 12 â€” Defect triage and release gate                 (WF08, WF09, gate)
   # Runs even when upstream stages failed: failures are exactly what the triage
   # agent exists to classify. Blocking: NFR-023 zero open S1 defects.
   # ===========================================================================
   defect-triage-and-release-gate:
-    name: '12 · Defect triage and release gate'
+    name: '12 Â· Defect triage and release gate'
     needs:
       - api-automation
       - bdd-ui-automation
@@ -806,10 +832,10 @@ jobs:
           ./assets/ci/invoke_agent.sh defect-triage /tmp/wf08_payload.json \
             "$EVIDENCE_DIR/WF08/triage_report.json" || \
           printf '%s' \
-            '{"verdict":"ADVISORY","summary":"ICA workflow endpoint not yet configured — Solution B pending. Triage advisory skipped.","findings":[],"evidence":[],"openS1Defects":0}' \
+            '{"verdict":"ADVISORY","summary":"ICA workflow endpoint not yet configured â€” Solution B pending. Triage advisory skipped.","findings":[],"evidence":[],"openS1Defects":0}' \
             > "$EVIDENCE_DIR/WF08/triage_report.json"
 
-      - name: DefectPredictionAgent — advisory risk forecast
+      - name: DefectPredictionAgent â€” advisory risk forecast
         env:
           ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
           ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
@@ -823,10 +849,10 @@ jobs:
           ./assets/ci/invoke_agent.sh defect-prediction /tmp/wf09_payload.json \
             "$EVIDENCE_DIR/WF09/prediction_report.json" || \
           printf '%s' \
-            '{"verdict":"ADVISORY","summary":"ICA workflow endpoint not yet configured — prediction skipped.","findings":[],"evidence":[]}' \
+            '{"verdict":"ADVISORY","summary":"ICA workflow endpoint not yet configured â€” prediction skipped.","findings":[],"evidence":[]}' \
             > "$EVIDENCE_DIR/WF09/prediction_report.json"
 
-      - name: ReleaseGateAgent — consolidated verdict
+      - name: ReleaseGateAgent â€” consolidated verdict
         env:
           ICA_WORKFLOW_URL: ${{ secrets.ICA_WORKFLOW_URL }}
           ICA_GATEWAY_TOKEN: ${{ secrets.ICA_GATEWAY_TOKEN }}
@@ -843,7 +869,7 @@ jobs:
           ./assets/ci/invoke_agent.sh release-gate /tmp/gate_payload.json \
             "$EVIDENCE_DIR/WF08/release_gate_verdict.json" || \
           printf '%s' \
-            '{"verdict":"ADVISORY","summary":"ICA ReleaseGateAgent not yet configured — Solution B pending. Human QE review required before merge.","findings":[],"evidence":[],"openS1Defects":0}' \
+            '{"verdict":"ADVISORY","summary":"ICA ReleaseGateAgent not yet configured â€” Solution B pending. Human QE review required before merge.","findings":[],"evidence":[],"openS1Defects":0}' \
             > "$EVIDENCE_DIR/WF08/release_gate_verdict.json"
 
       - name: Publish the verdict to the pull request
@@ -856,7 +882,7 @@ jobs:
             let body = '## QE Agentic Release Gate\n\n';
             try {
               const v = JSON.parse(fs.readFileSync(path, 'utf8'));
-              const icon = { PASS: '✅', WARN: '⚠️', FAIL: '❌' }[v.verdict] || 'ℹ️';
+              const icon = { PASS: 'âœ…', WARN: 'âš ï¸', FAIL: 'âŒ' }[v.verdict] || 'â„¹ï¸';
               body += `${icon} **Verdict: ${v.verdict ?? 'UNKNOWN'}**\n\n`;
               body += `${v.summary ?? ''}\n\n`;
               if (Array.isArray(v.findings) && v.findings.length) {
