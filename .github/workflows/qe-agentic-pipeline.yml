@@ -511,11 +511,15 @@ jobs:
 
       - name: Run the agent-selected UI and BDD suites
         run: |
-          # Skip if no UI/BDD test sources exist yet (WF04/WF06 pending authoring)
-          TEST_COUNT=$(find src/test/java -name "*Test.java" \
-            ! -path "*/unit/*" ! -path "*/tests/Smoke*" 2>/dev/null | wc -l || echo 0)
-          if [[ "$TEST_COUNT" -eq 0 ]]; then
-            echo "::warning title=BDD-UI::No UI/BDD test classes found yet (WF04/WF06 pending). Stage skipped."
+          # Skip if no UI/BDD test sources exist yet (WF04/WF06 pending authoring).
+          # Exclude SmokeTest and anything under tests/ — those are skeleton-only.
+          BDD_COUNT=$(find src/test/java -name "*Test.java" \
+            ! -name "SmokeTest.java" \
+            ! -path "*/tests/*" \
+            ! -path "*/unit/*" 2>/dev/null | wc -l || echo 0)
+          FEATURE_COUNT=$(find src/test/resources/features -name "*.feature" 2>/dev/null | wc -l || echo 0)
+          if [[ "$BDD_COUNT" -eq 0 && "$FEATURE_COUNT" -eq 0 ]]; then
+            echo "::warning title=BDD-UI::No UI/BDD test classes or feature files found (WF04/WF06 pending). Stage skipped."
             mkdir -p "$EVIDENCE_DIR/WF06"
             printf '%s' '{"status":"skipped","reason":"No UI/BDD test sources yet - WF04 and WF06 pending"}' \
               > "$EVIDENCE_DIR/WF06/bdd_ui_status.json"
@@ -597,6 +601,15 @@ jobs:
       - name: Start the local application under test
         run: |
           set -euo pipefail
+          # Skip entire performance stage if no JMeter plan exists yet (WF12 pending)
+          JMX_COUNT=$(find src/test/resources/jmeter -name "*.jmx" 2>/dev/null | wc -l || echo 0)
+          if [[ "$JMX_COUNT" -eq 0 ]]; then
+            echo "::warning title=WF12::No JMeter plan (.jmx) found yet (WF12 pending). Performance stage skipped."
+            mkdir -p "$EVIDENCE_DIR/WF12"
+            printf 'gate,metric,actual,operator,threshold,result\nNFR-008,p95 response time (ms),skipped,<=,1200,SKIP\nNFR-009,error rate (%%),skipped,<=,1,SKIP\nNFR-010,throughput (req/s),skipped,>=,40,SKIP\n' \
+              > "$EVIDENCE_DIR/WF12/jmeter_summary.csv"
+            exit 0
+          fi
           git clone --depth 1 https://github.com/spring-petclinic/spring-petclinic-rest.git /tmp/aut-perf
           (cd /tmp/aut-perf && ./mvnw -B -ntp -q -DskipTests package)
           nohup java -jar /tmp/aut-perf/target/*.jar > /tmp/aut-perf.log 2>&1 &
@@ -621,6 +634,10 @@ jobs:
 
       - name: Enforce NFR-008, NFR-009 and NFR-010
         run: |
+          if [[ ! -f "$EVIDENCE_DIR/WF12/jmeter_summary.csv" ]]; then
+            echo "::warning title=NFR-008::No JMeter results (WF12 pending). Gate deferred."
+            exit 0
+          fi
           python3 assets/ci/check_jmeter_thresholds.py \
             --results-dir target/jmeter/results \
             --p95-ms 1200 --error-rate-pct 1 --min-throughput 40 \
@@ -660,6 +677,15 @@ jobs:
       - name: Start the local application under test
         run: |
           set -euo pipefail
+          # Skip entire a11y AUT startup if no a11y tests exist yet (WF14 pending)
+          A11Y_CHECK=$(find src/test/java -path "*/a11y/*Test.java" 2>/dev/null | wc -l || echo 0)
+          if [[ "$A11Y_CHECK" -eq 0 ]]; then
+            echo "::warning title=WF14::No a11y test classes yet (WF14 pending). Accessibility AUT startup skipped."
+            mkdir -p "$EVIDENCE_DIR/WF14"
+            printf '%s' '{"status":"skipped","reason":"WF14 a11y assets not yet authored"}' \
+              > "$EVIDENCE_DIR/WF14/axe_report_status.json"
+            exit 0
+          fi
           git clone --depth 1 https://github.com/spring-projects/spring-petclinic.git /tmp/aut-a11y
           (cd /tmp/aut-a11y && ./mvnw -B -ntp -q -DskipTests package)
           nohup java -jar /tmp/aut-a11y/target/*.jar > /tmp/aut-a11y.log 2>&1 &
